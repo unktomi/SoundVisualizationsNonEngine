@@ -11,7 +11,7 @@ The following Blueprint functions and classes are provided:
   
 The USpectrumAnalyzer class in turn provides the following functions:
 
-    CalculateFrequencySpectrum(USpectrumAnalyzer *Target, TArray<float> &OutSpectrum)
+    CalculateFrequencySpectrum(USpectrumAnalyzer *Target, int Channel, TArray<float> &OutSpectrum)
     GetAmplitude(USpectrumAnalyzer *Target, int Channel, TArray<float> &OutAmplitudes)
   
 The intention is that CreateSpectrumAnalyzer should be called in the BeginPlay event to create an instance and saved in a variable.
