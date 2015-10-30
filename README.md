@@ -7,12 +7,12 @@ from a MediaPlayer - the original plugin only worked with .wav files apparently.
 
 The following Blueprint functions and classes are provided:
 
-    USpectrumAnalyzer CreateSpectrumAnayzer (MediaPlayer Player, float WindowDurationInSeconds, int SpectrumWidth, int AmplitudeBuckets)
+    USpectrumAnalyzer CreateSpectrumAnayzer (MediaPlayer *Player, float WindowDurationInSeconds, int SpectrumWidth, int AmplitudeBuckets)
   
 The USpectrumAnalyzer class in turn provides the following functions:
 
-    CalculateFrequencySpectrum(USpectrumAnalyzer Target, TArray<float> &OutSpectrum)
-    GetAmplitude(USpectrumAnalyzer Target, int Channel, TArray<float> &OutAmplitudes)
+    CalculateFrequencySpectrum(USpectrumAnalyzer *Target, TArray<float> &OutSpectrum)
+    GetAmplitude(USpectrumAnalyzer *Target, int Channel, TArray<float> &OutAmplitudes)
   
 The intention is that CreateSpectrumAnalyzer should be called in the BeginPlay event to create an instance and saved in a variable.
 Then in EventTick call the methods of USpectrumAnalyzer as necessary.
