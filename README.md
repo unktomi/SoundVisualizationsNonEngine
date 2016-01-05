@@ -7,7 +7,10 @@ from a MediaPlayer - the original plugin only worked with .wav files apparently.
 
 The following Blueprint functions and classes are provided:
 
-    USpectrumAnalyzer *CreateSpectrumAnalyzer (UMediaPlayer *Player, float WindowDurationInSeconds, int SpectrumWidth, int AmplitudeBuckets)
+    USpectrumAnalyzer *CreateSpectrumAnalyzer (UMediaPlayer *Player, 
+                                                float WindowDurationInSeconds, 
+                                                int SpectrumWidth, 
+                                                int AmplitudeBuckets)
   
 The USpectrumAnalyzer class in turn provides the following functions:
 
