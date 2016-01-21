@@ -5,11 +5,15 @@ namespace UnrealBuildTool.Rules
     using System.IO;
     public class SoundVisualizationsNonEngine : ModuleRules
     {
+        private string EnginePath
+        {
+            get { return Path.GetFullPath(BuildConfiguration.RelativeEnginePath); }
+        }
         private string ModulePath
         {
             get { return Path.GetDirectoryName(RulesCompiler.GetModuleFilename(this.GetType().Name)); }
         }
-        private string ThirdPartyPath
+        private string ModuleThirdPartyPath
         {
             get { return Path.GetFullPath(Path.Combine(ModulePath, "../../Thirdparty/")); }
         }
@@ -28,22 +32,21 @@ namespace UnrealBuildTool.Rules
 				}
                 );
 
-		string Kiss_FFTPath = ThirdPartyPath;
-		if (Target.Platform == UnrealTargetPlatform.Win64)
-		{
-			if (Target.Configuration == UnrealTargetConfiguration.Debug && BuildConfiguration.bDebugBuildsActuallyUseDebugCRT)
-			{
-				PublicLibraryPaths.Add(Kiss_FFTPath + "/Windows/x64/Debug");
-			}
-			else
-			{
-				PublicLibraryPaths.Add(Kiss_FFTPath + "/Windows/x64/Release");
-			}
+            if (Target.Platform == UnrealTargetPlatform.Win64)
+            {
+                if (Target.Configuration == UnrealTargetConfiguration.Debug && BuildConfiguration.bDebugBuildsActuallyUseDebugCRT)
+                {
+                    PublicLibraryPaths.Add(Path.Combine(ModuleThirdPartyPath, "./Windows/x64/Debug"));
+                }
+                else
+                {
+                    // Use the engine library
+                    PublicLibraryPaths.Add(Path.Combine(EnginePath, "./Source/ThirdParty/Kiss_FFT/kiss_fft129/Lib/x64/VS2015/Release/"));
+                }
 
-			PublicAdditionalLibraries.Add("KissFFT.lib");
-                        PrivateIncludePaths.Add(Path.Combine(ThirdPartyPath, "Include"));
-
-		}
+                PublicAdditionalLibraries.Add("KissFFT.lib");
+                PrivateIncludePaths.Add(Path.Combine(ModuleThirdPartyPath, "Include"));
+            }
         }
     }
 }
