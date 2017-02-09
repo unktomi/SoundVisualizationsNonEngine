@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Copyright 2016 Google
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<root xmlns:android="http://schemas.android.com/apk/res/android">
+	<trace enable="true"/>
+
+	<!-- SoundVisualizationsNonEnginePlugin Plugin Android Build Initialisation, specify any extra needed variables, 
+		such as platform detection, here. -->
+	<init>
+	</init>
+
+	<!-- SoundVisualizationsNonEngine updates applied to AndroidManifest.xml -->
+	<androidManifestUpdates>
+	  <log text="SoundVisualizationsNonEngine Plugin Android Manifest Additions"/>
+    
+
+    <addPermission android:name="android.permission.RECORD_AUDIO"/>
+
+	</androidManifestUpdates>
+	<resourceCopies>
+    <log text="SoundVisualizations Plugin Android Source Code and Library Resource Copies"/>
+    <copyDir src="$S(PluginDir)/../Java/src/com" dst="$S(BuildDir)/src/com" />  
+  </resourceCopies> 
+  <proguardAdditions>
+    <insert>
+      -keep public class com.soundVisualizationsNonEngine.SoundVisualizer
+    </insert>
+  </proguardAdditions>  
+	<gameActivityImportAdditions>
+		<insert>
+       import com.soundVisualizationsNonEngine.SoundVisualizer;
+			
+		</insert>
+	</gameActivityImportAdditions>
+
+	<gameActivityClassAdditions>
+		<insert>
+
+
+
+      static public Class AndroidThunkJava_SoundVisualizationsNonEngineGetVisualizerClass() {
+            return SoundVisualizer.class;
+      }
+
+        </insert>
+	</gameActivityClassAdditions>
+	<gameActivityReadMetadataAdditions>
+		<insert>
+		</insert>
+	</gameActivityReadMetadataAdditions>
+
+	<!-- When the Activity Resumes, tell the SoundVisualizationsNonEngine Interface to resume. -->
+	<gameActivityOnCreateAdditions>
+          <insert>
+          </insert>
+	</gameActivityOnCreateAdditions>
+	<!-- When the Activity Resumes, tell the SoundVisualizationsNonEngine Interface to resume. -->
+	<gameActivityOnResumeAdditions>
+		<insert>
+		 </insert>
+	</gameActivityOnResumeAdditions>
+  
+  <!-- When the Activity pauses, tell the SoundVisualizationsNonEngine Interface to pause. -->
+  <gameActivityOnPauseAdditions>
+    <insert>
+    </insert>
+  </gameActivityOnPauseAdditions>
+
+	<gameActivityOnActivityResultAdditions>
+		<insert>
+
+		</insert>
+	</gameActivityOnActivityResultAdditions>
+	
+    <!-- @NOTE: We have disabled this as there is now library loading code in the static braces of SoundVisualizationsNonEngineInterface -->
+	<!-- Tell the Java implementation to load the SoundVisualizationsNonEngine API library on the device 
+		before we start executing the GameActivity. -->
+    <soLoadLibrary>
+        <insert>
+        </insert>
+    </soLoadLibrary>
+</root>
