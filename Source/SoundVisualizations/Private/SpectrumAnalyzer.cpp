@@ -1,19 +1,69 @@
 #include "SoundVisualizationsNonEnginePrivatePCH.h"
 #include "SpectrumAnalyzer.h"
-#include "IMediaPlayer.h"
-#include "IMediaAudioTrack.h"
 #include "kiss_fft.h"
+
 DEFINE_LOG_CATEGORY_STATIC(LogSpectrumAnalyzer, Log, All);
+
+// Hacks for android which has degenerate support for IMediaPlayer.
+// The Epic implementation AndroidMediaPlayer ultimately depends on the java MediaPlayer. 
+// Our workaround is to use the android Visualizer to
+// obtain 8-bit periodic samples.
+
+#if PLATFORM_ANDROID
+#include "Android/AndroidJNI.h"
+#include "Android/AndroidApplication.h"
+#include <android_native_app_glue.h>
+
+jmethodID USpectrumAnalyzer::CreateVisualizer = 0;
+jmethodID USpectrumAnalyzer::EnableVisualizer = 0;
+jclass USpectrumAnalyzer::VisualizerClass = 0;
+
+void USpectrumAnalyzer::InitMethodIds()
+{
+	if (CreateVisualizer == 0)
+	{
+		if (JNIEnv* Env = FAndroidApplication::GetJavaEnv())
+		{
+			jmethodID method = FJavaWrapper::FindStaticMethod(Env, FJavaWrapper::GameActivityClassID, "AndroidThunkJava_SoundVisualizationsNonEngineGetVisualizerClass", "()Ljava/lang/Class;", false);
+			VisualizerClass = (jclass)Env->CallStaticObjectMethod(FJavaWrapper::GameActivityClassID, method);
+			CreateVisualizer = FJavaWrapper::FindStaticMethod(Env, VisualizerClass, "createSoundVisualizer", "(JI)Lcom/soundVisualizationsNonEngine/SoundVisualizer;", false);
+			EnableVisualizer = FJavaWrapper::FindMethod(Env, VisualizerClass, "setEnabled", "(Z)V", false);
+		}
+	}
+}
+
+#endif
+
 
 USpectrumAnalyzer::USpectrumAnalyzer(const class FObjectInitializer& PCIP)
 	: Super(PCIP),
 	Sink(new SinkDelegate(this)),
-	SampleIndex(0),
+	CurSampleIndex(0),
 	CurrentTime(FTimespan(0)),
 	PlaybackTime(FTimespan(0)),
-	PCMData(nullptr)
+	PCMData(nullptr),
+	WindowDurationInSeconds(0.03333f),
+	SpectrumWidth(10),
+	AmplitudeBuckets(10)
 {
+#if PLATFORM_ANDROID
+	this->Visualizer = 0;
+#endif
 }
+
+void USpectrumAnalyzer::BeginDestroy()
+{
+	if (MediaPlayer != nullptr)
+	{
+		if (MediaPlayer->GetPlayer().IsValid())
+		{
+			MediaPlayer->GetPlayer()->GetOutput().SetAudioSink(nullptr);
+		}
+	}
+	Super::BeginDestroy();
+}
+
+
 
 USpectrumAnalyzer::~USpectrumAnalyzer()
 {
@@ -21,42 +71,121 @@ USpectrumAnalyzer::~USpectrumAnalyzer()
 }
 
 SinkDelegate::
-SinkDelegate(USpectrumAnalyzer *Ptr) : Analyzer(Ptr) {}
+SinkDelegate(USpectrumAnalyzer *InAnalyzer) : Analyzer(InAnalyzer) {}
 
 void SinkDelegate::
-ProcessMediaSample(const void* Buffer, uint32 BufferSize, FTimespan Duration, FTimespan Time)
+PlayAudioSink(const uint8* Buffer, uint32 BufferSize, FTimespan Time)
 {
-	UObject *U = Analyzer.Get();
-	if (U != nullptr) ((USpectrumAnalyzer*)U)->ProcessMediaSample(Buffer, BufferSize, Duration, Time);
+	USpectrumAnalyzer *U = (USpectrumAnalyzer*)Analyzer.Get();
+	uint32 NumSamples = BufferSize / (sizeof(uint16) * Channels);
+	FTimespan Duration = FTimespan::FromSeconds((double)NumSamples / (double)SampleRate);
+	if (U != nullptr)
+	{
+		UMediaSoundWave* SoundWave = GetSoundWave();
+		if (SoundWave != nullptr)
+		{
+			SoundWave->PlayAudioSink(Buffer, BufferSize, Time);
+		}
+		U->ProcessMediaSample(Channels, SampleRate, Buffer, BufferSize, Duration, Time);
+	}
+}
+
+UMediaSoundWave*
+SinkDelegate::GetSoundWave()
+{
+#if PLATFORM_ANDROID
+	// no support for this on android yet
+#else
+	USpectrumAnalyzer* U = (USpectrumAnalyzer*)Analyzer.Get();
+	if (U != nullptr)
+	{
+		return U->SoundWave;
+	}
+#endif
+	return nullptr;
+}
+
+void SinkDelegate::FlushAudioSink()
+{
+	UMediaSoundWave* SoundWave = GetSoundWave();
+	if (SoundWave != nullptr) SoundWave->FlushAudioSink();
+}
+
+bool SinkDelegate::InitializeAudioSink(uint32 InChannels, uint32 InSampleRate)
+{
+	Channels = InChannels;
+	SampleRate = InSampleRate;
+	bool bSoundWaveResult = true;
+	UMediaSoundWave* SoundWave = GetSoundWave();
+	if (SoundWave != nullptr) {
+		bSoundWaveResult = SoundWave->InitializeAudioSink(InChannels, InSampleRate);
+	}
+#if PLATFORM_ANDROID	
+	USpectrumAnalyzer *U = (USpectrumAnalyzer*)Analyzer.Get();
+	USpectrumAnalyzer::InitMethodIds();
+	JNIEnv* Env = FAndroidApplication::GetJavaEnv();
+	jobject Obj = Env->CallStaticObjectMethod(U->VisualizerClass, USpectrumAnalyzer::CreateVisualizer, (jlong)U, (int32)SampleRate);
+	U->Visualizer = Env->NewGlobalRef(Obj);
+	FJavaWrapper::CallVoidMethod(Env, U->Visualizer, USpectrumAnalyzer::EnableVisualizer, true);
+	UE_LOG(LogSpectrumAnalyzer, Log, TEXT("Created Android Sound Visualizer %p, sample rate: %d"), U->Visualizer, SampleRate);
+	Env->DeleteLocalRef(Obj);
+#endif
+	return bSoundWaveResult && Channels > 0 && SampleRate > 0;
+}
+
+int32 SinkDelegate::GetAudioSinkChannels() const { return Channels; }
+int32 SinkDelegate::GetAudioSinkSampleRate() const { return SampleRate; }
+
+void SinkDelegate::PauseAudioSink()
+{
+	UMediaSoundWave* SoundWave = GetSoundWave();
+	if (SoundWave != nullptr) SoundWave->PauseAudioSink();
+}
+
+void SinkDelegate::ResumeAudioSink()
+{
+	UMediaSoundWave* SoundWave = GetSoundWave();
+	if (SoundWave != nullptr) SoundWave->ResumeAudioSink();
+}
+
+void SinkDelegate::ShutdownAudioSink()
+{
+	UMediaSoundWave* SoundWave = GetSoundWave();
+	if (SoundWave != nullptr) SoundWave->ShutdownAudioSink();
+#if PLATFORM_ANDROID
+	USpectrumAnalyzer* U = (USpectrumAnalyzer*)Analyzer.Get();
+	JNIEnv* Env = FAndroidApplication::GetJavaEnv();
+	FJavaWrapper::CallVoidMethod(Env, U->Visualizer, USpectrumAnalyzer::EnableVisualizer, false);
+	Env->DeleteGlobalRef(U->Visualizer);
+	U->Visualizer = 0;
+#endif
 }
 
 void USpectrumAnalyzer::
-ProcessMediaSample(const void* Buffer, volatile uint32 BufferSize, FTimespan Duration, FTimespan Time)
+ProcessMediaSample(uint32 NumChannels, uint32 SamplesPerSecond, const uint8* Buffer, volatile uint32 BufferSize, FTimespan Duration, FTimespan Time)
 {
 	FScopeLock ScopeLock(&CriticalSection);
-	uint32 NumChannels = CurrentTrack->GetNumChannels();
-	uint32 SamplesPerSecond =CurrentTrack->GetSamplesPerSecond();
 	// buffer a few seconds
-	uint32 SamplesNeeded = SamplesPerSecond*NumChannels *3;// WindowDurationInSeconds;
+	uint32 SamplesNeeded = SamplesPerSecond*NumChannels * 3;// WindowDurationInSeconds;
 	uint32 PoT = 2;
 	while (PoT < SamplesNeeded) PoT *= 2;
 	if (PCMData == nullptr || PCMData->Capacity() < PoT)
 	{
 		delete PCMData;
 		PCMData = new TCircularBuffer<int16>(PoT, (int16)0);
-		SampleIndex = 0;
+		CurSampleIndex = 0;
 	}
 	CurrentTime = Time + Duration;
 	uint32 SampleCount = Duration.GetTotalSeconds() * SamplesPerSecond;
 	uint32 SamplesAvailable = BufferSize / sizeof(int16);
 	int16 *SampleBuffer = (int16*)(Buffer);
-	uint32 Start = SampleIndex;
+	uint32 Start = CurSampleIndex;
 	for (uint32 i = 0; i < SamplesAvailable; i++)
 	{
-		(*PCMData)[SampleIndex] = SampleBuffer[i];
-		SampleIndex = PCMData->GetNextIndex(SampleIndex);
+		(*PCMData)[CurSampleIndex] = SampleBuffer[i];
+		CurSampleIndex = PCMData->GetNextIndex(CurSampleIndex);
 	}
-	uint32 End = SampleIndex;
+	//uint32 End = CurSampleIndex;
 	//UE_LOG(LogSpectrumAnalyzer, Warning, TEXT("Samples available %d, Buffered %f seconds, Current time %f"), SamplesAvailable, (CurrentTime-PlaybackTime).GetTotalSeconds(), Time.GetTotalSeconds());
 
 }
@@ -83,6 +212,7 @@ CalculateFrequencySpectrum(int32 Channel, TArray<float> &OutSpectrum)
 		OutSpectrum.AddZeroed(SpectrumWidth);
 		return;
 	}
+	
 	if (Spectrums.Num() > 0)
 	{
 		if (Channel == 0)
@@ -95,62 +225,95 @@ CalculateFrequencySpectrum(int32 Channel, TArray<float> &OutSpectrum)
 		}
 		else
 		{
-			//UE_LOG(LogSoundVisualization, Warning, TEXT("Requested channel %d, sound only has %d channels"), SoundWave->NumChannels);
+			UE_LOG(LogSpectrumAnalyzer, Error, TEXT("Requested channel %d, sound only has %d channels"), SoundWave->NumChannels);
 		}
+	}
+	for (int32 i = 0; i < OutSpectrum.Num(); i++)
+	{
+		if (!FMath::IsFinite(OutSpectrum[i]))
+		{
+			OutSpectrum[i] = 0.0f;
+		}
+	}
+}
+
+void USpectrumAnalyzer::BeginPlay()
+{
+#if PLATFORM_ANDROID
+	InitMethodIds();
+#endif
+	if (MediaPlayer != nullptr)
+	{
+		MediaPlayer->SetSoundWave(nullptr);
+		MediaPlayer->OnMediaOpened.AddDynamic(this, &USpectrumAnalyzer::HandleMediaOpened);
+		MediaPlayer->OnMediaClosed.AddDynamic(this, &USpectrumAnalyzer::HandleMediaClosed);
+	}
+}
+
+void USpectrumAnalyzer::HandleMediaOpened(FString OpenedUrl)
+{
+	CurrentTime = MediaPlayer->GetTime();
+	ConnectSink();
+}
+
+
+void USpectrumAnalyzer::ConnectSink()
+{
+	if (MediaPlayer != nullptr)
+	{
+		TSharedPtr<IMediaPlayer> Player = MediaPlayer->GetPlayer();
+		if (Player.IsValid())
+		{
+			Player->GetOutput().SetAudioSink(&Sink.Get());
+		}
+	}
+}
+
+void USpectrumAnalyzer::HandleMediaClosed()
+{
+	if (MediaPlayer != nullptr)
+	{
+		TSharedPtr<IMediaPlayer> Player = MediaPlayer->GetPlayer();
+		if (Player.IsValid())
+		{
+			Player->GetOutput().SetAudioSink(nullptr);
+		}
+	}
+}
+
+void USpectrumAnalyzer::EndPlay(EEndPlayReason::Type Reason)
+{
+	if (MediaPlayer != nullptr)
+	{
+		MediaPlayer->OnMediaOpened.RemoveDynamic(this, &USpectrumAnalyzer::HandleMediaOpened);
+		MediaPlayer->OnMediaClosed.RemoveDynamic(this, &USpectrumAnalyzer::HandleMediaClosed);
 	}
 }
 
 bool USpectrumAnalyzer::
 DoCalculateFrequencySpectrum(bool bSplitChannels, TArray<TArray<float> > &OutSpectrums)
 {
-
-	if (MediaPlayer != nullptr)
-	{
-		TSharedPtr<IMediaPlayer> Player = MediaPlayer->GetPlayer();
-		if (Player.IsValid())
-		{
-			IMediaAudioTrackPtr Track = Player->GetAudioTracks().Num() == 0 ? IMediaAudioTrackPtr(nullptr) : Player->GetAudioTracks()[0];
-			if (CurrentTrack != Track)
-			{
-				if (CurrentTrack.IsValid())
-				{
-					CurrentTrack->GetStream().RemoveSink(Sink);
-				}
-				CurrentTrack = Track;
-				if (CurrentTrack.IsValid())
-				{
-					CurrentTrack->GetStream().AddSink(Sink);
-				}
-			}
-		}
-	}
-	if (!CurrentTrack.IsValid())
-	{
-		return false;
-	}
-	if (MediaPlayer->IsPaused())
+	if (MediaPlayer == nullptr || MediaPlayer->IsPaused())
 	{
 		return false;
 	}
 	FScopeLock ScopeLock(&CriticalSection);
 	if (PCMData == nullptr) return false;
-	
-	
-	uint32 NumChannels = CurrentTrack->GetNumChannels();
-	uint32 SamplesPerSecond = CurrentTrack->GetSamplesPerSecond();
-	PlaybackTime = MediaPlayer->GetPlayer()->GetTime();
-	//UE_LOG(LogSpectrumAnalyzer, Warning, TEXT("PlaybackTime %f, CurrentTime %f"), PlaybackTime.GetTotalSeconds(), CurrentTime.GetTotalSeconds());
+	PlaybackTime = MediaPlayer->GetTime();
+	//UE_LOG(LogSpectrumAnalyzer, Log, TEXT("PlaybackTime %f, CurrentTime %f"), PlaybackTime.GetTotalSeconds(), CurrentTime.GetTotalSeconds());
 	FTimespan Delta = CurrentTime - PlaybackTime;
+	uint32 NumChannels = Sink->GetNumChannels();
+	uint32 SamplesPerSecond = Sink->GetSamplesPerSecond();
 	int32 DeltaSamples = Delta.GetTotalSeconds() * SamplesPerSecond * NumChannels;
 	uint32 SamplesNeeded = SamplesPerSecond * NumChannels * WindowDurationInSeconds;
-	if (SampleIndex < SamplesNeeded)
+	if (CurSampleIndex < SamplesNeeded)
 	{
 		//return false;
 	}
 	int32 SampleCount = SamplesNeeded;
-	int32 LastSample = SampleIndex-DeltaSamples-1;
+	int32 LastSample = CurSampleIndex - DeltaSamples - 1;
 	int32 FirstSample = LastSample - SampleCount;
-	//UE_LOG(LogSpectrumAnalyzer, Warning, TEXT("Samples %d .. %d"), FirstSample, LastSample);
+	//UE_LOG(LogSpectrumAnalyzer, Log, TEXT("Samples %d .. %d"), FirstSample, LastSample);
 
 	volatile int32 SamplesToRead = LastSample - FirstSample;
 	// Setup the output data
@@ -177,7 +340,7 @@ DoCalculateFrequencySpectrum(bool bSplitChannels, TArray<TArray<float> > &OutSpe
 			//SoundWave->RawData.Unlock();
 			return false;
 		}
-		
+
 		kiss_fft_cpx* buf[10] = { 0 };
 		kiss_fft_cpx* out[10] = { 0 };
 		kiss_fft_cfg stf = kiss_fft_alloc(SamplesToRead, 1, 0, 0);
@@ -232,7 +395,7 @@ DoCalculateFrequencySpectrum(bool bSplitChannels, TArray<TArray<float> > &OutSpe
 			int32 SamplesRead = 0;
 			double SampleSum = 0;
 			int32 SamplesForSpectrum = SamplesPerSpectrum + (ExcessSamples-- > 0 ? 1 : 0);
-			
+
 			for (uint32 ChannelIndex = 0; ChannelIndex < NumChannels; ++ChannelIndex)
 			{
 				if (out[ChannelIndex])
@@ -304,7 +467,14 @@ GetAmplitude(int32 Channel, TArray<float> &OutSpectrum)
 		}
 		else
 		{
-			//UE_LOG(LogSoundVisualization, Warning, TEXT("Requested channel %d, sound only has %d channels"), SoundWave->NumChannels);
+			UE_LOG(LogSoundVisualization, Error, TEXT("Requested channel %d, sound only has %d channels"), SoundWave->NumChannels);
+		}
+	}
+	for (int32 i = 0; i < OutSpectrum.Num(); i++)
+	{
+		if (!FMath::IsFinite(OutSpectrum[i]))
+		{
+			OutSpectrum[i] = 0.0f;
 		}
 	}
 }
@@ -318,24 +488,8 @@ DoGetAmplitude(bool bSplitChannels, TArray<TArray<float> > &OutAmplitudes)
 		TSharedPtr<IMediaPlayer> Player = MediaPlayer->GetPlayer();
 		if (Player.IsValid())
 		{
-			IMediaAudioTrackPtr Track = Player->GetAudioTracks().Num() == 0 ? IMediaAudioTrackPtr(nullptr) : Player->GetAudioTracks()[0];
-			if (CurrentTrack != Track)
-			{
-				if (CurrentTrack.IsValid())
-				{
-					CurrentTrack->GetStream().RemoveSink(Sink);
-				}
-				CurrentTrack = Track;
-				if (CurrentTrack.IsValid())
-				{
-					CurrentTrack->GetStream().AddSink(Sink);
-				}
-			}
+			Player->GetOutput().SetAudioSink(&Sink.Get());
 		}
-	}
-	if (!CurrentTrack.IsValid())
-	{
-		return false;
 	}
 	if (MediaPlayer->IsPaused())
 	{
@@ -343,19 +497,19 @@ DoGetAmplitude(bool bSplitChannels, TArray<TArray<float> > &OutAmplitudes)
 	}
 	FScopeLock ScopeLock(&CriticalSection);
 	if (PCMData == nullptr) return false;
-	uint32 NumChannels = CurrentTrack->GetNumChannels();
-	uint32 SamplesPerSecond = CurrentTrack->GetSamplesPerSecond();
+	uint32 NumChannels = Sink->GetNumChannels();
+	uint32 SamplesPerSecond = Sink->GetSamplesPerSecond();
 	uint32 SamplesNeeded = SamplesPerSecond * NumChannels * WindowDurationInSeconds;
-	if (SampleIndex < SamplesNeeded)
+	if (CurSampleIndex < SamplesNeeded)
 	{
 		//return;
 	}
 	int32 SampleCount = SamplesNeeded;
-	PlaybackTime = MediaPlayer->GetPlayer()->GetTime();
-	
+	PlaybackTime = MediaPlayer->GetTime();
+
 	FTimespan Delta = CurrentTime - PlaybackTime;
 	int32 DeltaSamples = Delta.GetTotalSeconds() * SamplesPerSecond * NumChannels;
-	int32 LastSample = SampleIndex-DeltaSamples-1;
+	int32 LastSample = CurSampleIndex - DeltaSamples - 1;
 	int32 FirstSample = LastSample - SampleCount;
 
 	volatile int32 SamplesToRead = LastSample - FirstSample;
@@ -369,7 +523,7 @@ DoGetAmplitude(bool bSplitChannels, TArray<TArray<float> > &OutAmplitudes)
 		//UE_LOG(LogSpectrumAnalyzer, Display, TEXT("PlaybackTime %f"), PlaybackTime.GetTotalSeconds());
 	}
 	OutAmplitudes.Empty();
-	
+
 	if (AmplitudeBuckets > 0 && NumChannels > 0)
 	{
 		// Setup the output data
@@ -389,8 +543,8 @@ DoGetAmplitude(bool bSplitChannels, TArray<TArray<float> > &OutAmplitudes)
 			if (NumChannels <= 2)
 			{
 				int64 SampleSum[2] = { 0 };
-				uint32 SamplesToRead = SamplesPerAmplitude + (ExcessSamples-- > 0 ? 1 : 0);
-				for (uint32 SampleIndex = 0; SampleIndex < SamplesToRead; ++SampleIndex)
+				SamplesToRead = SamplesPerAmplitude + (ExcessSamples-- > 0 ? 1 : 0);
+				for (int32 SampleIndex = 0; SampleIndex < SamplesToRead; ++SampleIndex)
 				{
 					for (uint32 ChannelIndex = 0; ChannelIndex < NumChannels; ++ChannelIndex)
 					{
@@ -411,3 +565,45 @@ DoGetAmplitude(bool bSplitChannels, TArray<TArray<float> > &OutAmplitudes)
 	}
 	return true;
 }
+
+
+#if PLATFORM_ANDROID
+
+void USpectrumAnalyzer::HandleCapture(const uint8* WaveForm, uint32 WaveFormSize)
+{
+	int32 NumChannels = Sink->GetNumChannels();
+	int32 SamplesPerSecond = Sink->GetSamplesPerSecond();
+	ResampleBuffer.Reset(WaveFormSize*NumChannels);
+	for (uint32 i = 0; i < WaveFormSize; i++)
+	{
+		for (int32 j = 0; j < NumChannels; j++)
+		{
+			ResampleBuffer.Add((int16)(WaveForm[i] - 0x80) << 8);
+		}
+	}
+	FTimespan Duration = FTimespan::FromSeconds(WaveFormSize / (double)SamplesPerSecond);
+	Sink->PlayAudioSink((const uint8*)ResampleBuffer.GetData(), ResampleBuffer.Num(), PlaybackTime + Duration);
+
+}
+
+extern "C"
+{
+
+	JNIEXPORT void JNICALL
+		Java_com_soundVisualizationsNonEngine_SoundVisualizer_nativeSendWaveForm(JNIEnv* Env, jclass clazz, jlong callbackObject, jbyteArray bytes, jint sampleRate)
+	{
+		//UE_LOG(LogSpectrumAnalyzer, Log, TEXT("Env %p, clazz %p, callbackObject %p, bytes %p, sampleRate %d "), Env, clazz, callbackObject, bytes, sampleRate);
+
+		jint length = Env->GetArrayLength(bytes);
+		jboolean bIsCopy;
+		jbyte* rawBytes = Env->GetByteArrayElements(bytes, &bIsCopy);
+		if (rawBytes != NULL)
+		{
+			((USpectrumAnalyzer*)callbackObject)->HandleCapture((const uint8*)rawBytes, length);
+		}
+		Env->ReleaseByteArrayElements(bytes, rawBytes, JNI_ABORT);
+
+	}
+}
+
+#endif
